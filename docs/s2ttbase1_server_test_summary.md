@@ -1,6 +1,6 @@
 # S2TTBase1 服务器测试总结（SeamlessM4T 中文语音 -> 文本）
 
-> 日期：2026-08-20
+> 日期：2026-08-20（创建）/ 2026-08-21（验证与修正）
 > 机器：server56（gpu56）
 > 工程目录：`/baykal/unisound/wangwentao/moshibase1/s2ttbase1`
 
@@ -36,13 +36,17 @@ docker commit s2ttbase1-test harbor.unidev.ai/wangwentao/s2ttbase1:20260820
 docker push harbor.unidev.ai/wangwentao/s2ttbase1:20260820
 ```
 
-- 镜像名：`harbor.unidev.ai/wangwentao/s2ttbase1:20260820`
-- digest：`sha256:d3f4872803c2e1ad62aeea63663f05f3421b83a0424555de04eeab6254d92668`
+- 镜像名：`harbor.unidev.ai/wangwentao/s2ttbase1:20260821`（推荐，含 streaming 卡片本地化）
+- digest：`sha256:d7f710ff1d1dfde4988fd6c4d08c5831c3f8a4e92d3e981733fa0970c47a11d6`
 - 大小：约 29.2GB（模型权重在挂载卷中，未打入镜像）
+
+> 旧镜像 `20260820`（digest `d3f4872803c2e1ad62aeea63663f05f3421b83a0424555de04eeab6254d92668`）仅本地化了离线模型卡片；streaming 卡片本地化是在 commit 之后才完成的，因此旧镜像跑流式仍会访问 HuggingFace 失败。`20260821` 已修正此问题。
 
 ## 3. 模型权重（ModelScope 下载）
 
 server56 无法访问 HuggingFace，按约定从 ModelScope 下载原始 checkpoint：
+
+> 重要：所有权重均下载到**工作目录挂载卷** `/baykal/unisound/wangwentao/moshibase1/s2ttbase1/models/`（容器内 `/workspace/s2ttbase1/models/`），并非容器临时目录。容器删除/重建后文件仍在，重新挂载即可使用。
 
 ### 3.1 离线模型 `facebook/seamless-m4t-v2-large`
 
@@ -198,4 +202,55 @@ for i in ids:
 1. 模型权重（约 13GB 离线 + 8GB 流式）在挂载卷 `s2ttbase1/models/`，未打入镜像；换机器时需重新挂载或下载。
 2. 模型卡本地化只改了 server56 工程副本与容器内 site-packages，本仓库保持原样；如需在别处复现，按第 3.3 节同样修改。
 3. 流式 S2TT 长句仍有轻微重复倾向，建议固定使用 `--block-ngrams`；如需更干净输出可进一步调低 `--max-len-b`。
-4. 已推送镜像 `harbor.unidev.ai/wangwentao/s2ttbase1:20260820` 不含最新 `--block-ngrams` 固化；如需要可改 `evaluate.py` 默认参数后重新 commit/push。
+4. 已推送镜像 `harbor.unidev.ai/wangwentao/s2ttbase1:20260821` 已包含 streaming 卡片本地化；`--block-ngrams` 尚未固化到 `evaluate.py` 默认参数，如需要可改后重新 commit/push。
+
+## 7. 容器重建验证（2026-08-21）
+
+针对「下载文件是否在临时目录、容器退掉后是否还在、code 是否能行」做的实际验证：
+
+### 7.1 文件位置确认
+
+模型权重位于宿主机挂载卷 `/baykal/unisound/wangwentao/moshibase1/s2ttbase1/models/`（而非容器可写层），`docker rm` 容器不影响这些文件。已验证以下文件完整存在：
+
+```text
+models/facebook/seamless-m4t-v2-large/seamlessM4T_v2_large.pt   （9.0GB）
+models/facebook/seamless-m4t-v2-large/vocoder_v2.pt
+models/facebook/seamless-m4t-v2-large/spm_char_lang38_tc.model
+models/facebook/seamless-m4t-v2-large/tokenizer.model
+models/facebook/seamless-streaming/seamless_streaming_unity.pt  （3.6GB）
+models/facebook/seamless-streaming/seamless_streaming_monotonic_decoder.pt  （4.3GB）
+models/facebook/seamless-streaming/vocoder_v2.pt
+models/facebook/seamless-streaming/spm_char_lang38_tc.model
+models/facebook/seamless-streaming/tokenizer.model
+```
+
+### 7.2 从镜像重建容器验证 code
+
+删除旧容器后用已推送镜像起全新容器（只挂载工作目录，不挂 HF 缓存）：
+
+```bash
+docker rm -f s2ttbase1-verify
+docker run -d --name s2ttbase1-verify --gpus all --shm-size=16g \
+  -v /baykal/unisound/wangwentao/moshibase1/s2ttbase1:/workspace/s2ttbase1 \
+  -w /workspace/s2ttbase1 harbor.unidev.ai/wangwentao/s2ttbase1:20260821 sleep infinity
+```
+
+**离线验证通过**（ASR + S2TT）：
+
+```text
+ASR : 简单的说这相当于惠普把消费领域市场拱手相让了
+S2TT: Simply put, it's the equivalent of HP taking over the consumer market.
+```
+
+**流式验证通过**（`--block-ngrams --no-strip-silence`）：
+
+```text
+0 :: Simply put, it's the equivalent of a consumer-oriented market.
+1 :: What you saw at the traffic jam on Beijing-Tibet highway
+```
+
+### 7.3 结论
+
+- 模型文件保存在工作目录挂载卷，容器重建后依然可用；
+- 从镜像（`20260821`）重建容器后，离线 S2TT/ASR 与流式 S2TT 均能直接运行；
+- 使用镜像时注意：流式评估需要 `--block-ngrams --no-strip-silence`；如不挂载 `models/` 目录需先下载权重。
